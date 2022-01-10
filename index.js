@@ -4,7 +4,7 @@ const Status = {
   rejected: "rejected",
 };
 
-class Future {
+export class Future {
   #status = Status.pending;
   #value;
   #onfulfilled = [];
@@ -24,44 +24,39 @@ class Future {
   }
 
   #resolve = (value) => {
-    if (this.#status === Status.pending) {
-      this.#status = Status.success;
+    if (this.#status !== Status.pending) return;
+    this.#status = Status.success;
+    queueMicrotask(() => {
+      try {
+        this.#value = value;
 
-      setTimeout(() => {
-        try {
-          this.#value = value;
-
-          for (let i = 0; i < this.#onfulfilled.length; i++) {
-            const fn = this.#onfulfilled[i];
-            const nextValue = fn(this.#value);
-
-            if (nextValue instanceof Future) {
-              this.#merge.bind(nextValue)(
-                this.#onfulfilled.slice(i + 1),
-                this.#onrejected,
-                this.#onfinally
-              );
-              this.#onfinally = [];
-              break;
-            }
-            this.#value = nextValue;
+        for (let i = 0; i < this.#onfulfilled.length; i++) {
+          const nextValue = this.#onfulfilled[i](this.#value);
+          if (nextValue instanceof Future) {
+            this.#merge.bind(nextValue)(
+              this.#onfulfilled.slice(i + 1),
+              this.#onrejected,
+              this.#onfinally
+            );
+            this.#onfinally = [];
+            break;
           }
-        } catch (err) {
-          this.#handleReject(err);
+          this.#value = nextValue;
         }
-        this.#handleFinally();
-      }, 0);
-    }
+      } catch (err) {
+        this.#handleReject(err);
+      }
+      this.#handleFinally();
+    });
   };
 
   #reject = (err) => {
-    if (this.#status === Status.pending) {
-      this.#status = Status.rejected;
-      setTimeout(() => {
-        this.#handleReject(err);
-        this.#handleFinally();
-      }, 0);
-    }
+    if (this.#status !== Status.pending) return;
+    this.#status = Status.rejected;
+    queueMicrotask(() => {
+      this.#handleReject(err);
+      this.#handleFinally();
+    });
   };
 
   #handleReject = (err) => {
@@ -76,7 +71,7 @@ class Future {
         this.#handleReject(err);
       }
     } else {
-      throw new Error(`Unhandled rejection: ${err}`);
+      throw new Error(`Unhandled rejection: ${err.message ?? err}`);
     }
   };
 
@@ -86,22 +81,26 @@ class Future {
 
   #merge(onfulfilled, onrejected, onfinally) {
     if (onfulfilled.length > 0) {
-      this.#onfulfilled = this.#onfulfilled.concat(onfulfilled);
+      this.#onfulfilled.push(...onfulfilled);
     }
     if (onrejected.length > 0) {
-      this.#onrejected = this.#onrejected.concat(onrejected);
+      this.#onrejected.push(...onrejected);
     }
     if (onfinally.length > 0) {
-      this.#onfinally = this.#onfinally.concat(onfinally);
+      this.#onfinally.push(...onfinally);
     }
   }
 
   then = (onfulfilled, onrejected) => {
     if (typeof onfulfilled === "function") {
       this.#onfulfilled.push(onfulfilled);
+    } else if (onfulfilled) {
+      throw new TypeError("'Onfulfilled' should be a function!");
     }
     if (typeof onrejected === "function") {
       this.#onrejected.push(onrejected);
+    } else if (onrejected) {
+      throw new TypeError("'Onrejected' should be a function!");
     }
     return this;
   };
@@ -113,35 +112,58 @@ class Future {
   finally = (onfinally) => {
     if (typeof onfinally === "function") {
       this.#onfinally.push(onfinally);
+    } else {
+      throw new TypeError("'Onfinally' should be a function!");
     }
     return this;
   };
 
-  static resolve() {
+  static resolve = () => {
     return new Future((res) => res());
   }
 
-  static reject(reason) {
+  static reject = (reason) => {
     return new Future((_, rej) => rej(reason));
   }
-}
 
-new Future((resolve) => {
-  setTimeout(() => {
-    resolve("some data");
-  }, 1000);
-  console.log("I am first");
-})
-  .then((val) => {
-    console.log(val);
-    return new Future((res) => res())
-      .then(() => console.log("hello 1"))
-      .finally(() => console.log("final 1"));
-  })
-  .then(() => {
-    console.log("hey");
-  })
-  .catch((err) => {
-    console.log(err);
-  })
-  .finally(() => console.log("final 2"));
+  static all = (futures = []) => {
+    return new Future((resolve, reject) => {
+      let fulfilledCount = 0;
+      const values = new Array(futures.length);
+      for (let i = 0; i < futures.length; i++) {
+        futures[i].then((value) => {
+          fulfilledCount++;
+          values[i] = value;
+          if (fulfilledCount === futures.length) {
+            resolve(values);
+          }
+        }, reject);
+      }
+    })
+  }
+
+  static allSettled = (futures = []) => {
+    return new Future((resolve, reject) => {
+      let fulfilledCount = 0;
+      const values = [];
+      const onfulfilled = (value) => {
+        fulfilledCount++;
+        values.push(value);
+        if (fulfilledCount === futures.length) {
+          resolve(values);
+        }
+      }
+      for (const future of futures) {
+        future.then(onfulfilled, reject);
+      }
+    })
+  }
+
+  static race(futures = []) {
+    return new Future((resolve, reject) => {
+      for (const future of futures) {
+        future.then(resolve, reject);
+      }
+    })
+  }
+}
